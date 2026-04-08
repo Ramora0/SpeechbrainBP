@@ -1,0 +1,6 @@
+speechbrain
+torch
+torchaudio
+sentencepiece
+hyperpyyaml
+wandb
