@@ -22,13 +22,13 @@ Transformer Decoder (4 layers) → CTC + Seq2Seq joint loss
 
 ```bash
 # Submit training job
-sbatch slurms/train-h100.slurm
+sbatch slurms/train-v100.slurm
 
 # With a different config
-sbatch slurms/train-h100.slurm hparams/conformer_small.yaml
+sbatch slurms/train-v100.slurm hparams/conformer_small.yaml
 
 # Extra overrides
-sbatch slurms/train-h100.slurm hparams/conformer_small.yaml --number_of_epochs=50
+sbatch slurms/train-v100.slurm hparams/conformer_small.yaml --number_of_epochs=50
 ```
 
 Always commit and push before submitting jobs with `git_pull=True`.
@@ -40,7 +40,7 @@ Always commit and push before submitting jobs with `git_pull=True`.
 | `train.py` | Training script (upstream SpeechBrain recipe, unmodified) |
 | `librispeech_prepare.py` | Data preparation (upstream, unmodified) |
 | `hparams/conformer_small.yaml` | Model config (adapted for OSC cluster paths) |
-| `slurms/train-h100.slurm` | Slurm submission script |
+| `slurms/train-v100.slurm` | Slurm submission script |
 
 ## Data Paths (OSC Pitzer)
 
@@ -52,8 +52,8 @@ Always commit and push before submitting jobs with `git_pull=True`.
 
 - `ctc_weight: 0.3` — **do not change without good reason**
 - `d_model: 144`, `num_encoder_layers: 12`, `num_decoder_layers: 4`
-- `precision: bf16` (H100 optimized)
-- `max_batch_length_train: 2000` (dynamic batching for H100 80GB)
+- `precision: fp32` (V100)
+- `max_batch_length_train: 900` (dynamic batching for V100 32GB)
 - `number_of_epochs: 110`
 
 ## Expected Results

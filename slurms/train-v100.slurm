@@ -27,5 +27,5 @@ cd "${SLURM_SUBMIT_DIR}"
 mkdir -p "$TMPDIR/LibriSpeech"
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/"
 
-source .h100/bin/activate
+source .v100/bin/activate
 python train.py "${HPARAMS_PATH}" --data_folder="$TMPDIR/LibriSpeech" "$@"
