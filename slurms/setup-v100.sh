@@ -29,7 +29,7 @@ echo "=== Installing SpeechBrain from ${SB_DIR} ==="
 pip install -e "${SB_DIR}"
 
 echo "=== Installing remaining dependencies ==="
-pip install "huggingface_hub<0.24" sentencepiece hyperpyyaml wandb
+pip install sentencepiece hyperpyyaml wandb
 
 echo "=== Verifying ==="
 python -c "import speechbrain; print(f'SpeechBrain {speechbrain.__version__} OK')"
