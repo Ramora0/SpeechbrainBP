@@ -224,6 +224,12 @@ class ASR(sb.core.Brain):
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
+            if hasattr(self.hparams, "wandb_logger"):
+                self.hparams.wandb_logger.log_stats(
+                    stats_meta=epoch_stats,
+                    train_stats=self.train_stats,
+                    valid_stats=stage_stats,
+                )
             self.checkpointer.save_and_keep_only(
                 meta={"ACC": stage_stats["ACC"], "epoch": epoch},
                 max_keys=["ACC"],
@@ -235,6 +241,11 @@ class ASR(sb.core.Brain):
                 stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
                 test_stats=stage_stats,
             )
+            if hasattr(self.hparams, "wandb_logger"):
+                self.hparams.wandb_logger.log_stats(
+                    stats_meta={"Epoch loaded": self.hparams.epoch_counter.current},
+                    test_stats=stage_stats,
+                )
             if if_main_process():
                 with open(
                     self.hparams.test_wer_file, "w", encoding="utf-8"

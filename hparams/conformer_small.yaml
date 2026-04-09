@@ -11,7 +11,8 @@
 
 seed: 7775
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/conformer_small_baseline/<seed>
+wandb_run_name: !ref conformer-small-baseline-s<seed>
+output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<wandb_run_name>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
@@ -316,8 +317,15 @@ compute_features: !new:speechbrain.lobes.features.Fbank
 
 ############################## Logging and Pretrainer ##########################
 
+wandb_project: speechbrain-new
+
 train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
     save_file: !ref <train_log>
+
+wandb_logger: !new:speechbrain.utils.train_logger.WandBLogger
+    initializer: !name:wandb.init
+        project: !ref <wandb_project>
+        name: !ref <wandb_run_name>
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 acc_computer: !name:speechbrain.utils.Accuracy.AccuracyStats
