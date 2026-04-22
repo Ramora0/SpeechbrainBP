@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=conformer_bp
+#SBATCH --job-name=conformer_ds
 #SBATCH --partition=gpu
 #SBATCH --time=24:00:00
 #SBATCH --nodes=1
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-HPARAMS_PATH="${1:-hparams/conformer_small_bp.yaml}"
+HPARAMS_PATH="${1:-hparams/conformer_small_downsample.yaml}"
 shift 2>/dev/null || true
 
 echo "JobID: ${SLURM_JOB_ID}"
@@ -28,4 +28,4 @@ mkdir -p "$TMPDIR/LibriSpeech"
 rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/"
 
 source .v100/bin/activate
-python train_bp.py "${HPARAMS_PATH}" --data_folder="$TMPDIR/LibriSpeech" "$@"
+python train_downsample.py "${HPARAMS_PATH}" --data_folder="$TMPDIR/LibriSpeech" "$@"

@@ -1,16 +1,19 @@
 # ############################################################################
-# Model: E2E ASR with Transformer + BoundaryPredictor
-# Encoder: CNN -> BoundaryPredictor (compress) -> Conformer Encoder
+# Model: E2E ASR with Transformer + Downsampler
+# Encoder: CNN -> Downsampler (compress) -> Conformer Encoder
 # Decoder: Transformer Decoder + (CTC/ATT joint) beamsearch + TransformerLM
 # Tokens: unigram
-# losses: CTC + KLdiv + boundary_predictor_loss_weight * binomial_loss
-# Training: Librispeech 960h
+# losses: CTC + KLdiv + downsample_loss_weight * aux_loss
+#
+# The `Downsampler` slot below is the BoundaryPredictor. To use a different
+# downsampler, swap the Downsampler instance for another module that returns
+# a DownsampleOutput (see downsampler.py).
 # ############################################################################
 # Seed needs to be set at top of yaml, before objects with parameters are made
 
 seed: 7775
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-wandb_run_name: !ref conformer-small-bp-s<seed>
+wandb_run_name: !ref conformer-small-downsample-bp-s<seed>
 output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<wandb_run_name>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
@@ -120,13 +123,15 @@ pad_index: 0
 bos_index: 1
 eos_index: 2
 
-# BoundaryPredictor parameters
+# Downsampler auxiliary loss weight (shared across downsamplers that have one)
+downsample_loss_weight: 1.0
+
+# BoundaryPredictor-specific parameters (only used by boundary_predictor.BoundaryPredictor)
 # prior: target fraction of boundaries -> compression ratio = 1/prior
 #   0.5 = 2x compression on top of the 4x CNN (= 8x total) — conservative default
 # boundary_mode: "learned" | "all" | "alternating"
 boundary_predictor_prior: 0.5
 boundary_predictor_temp: 1.0
-boundary_predictor_loss_weight: 1.0
 boundary_mode: learned
 
 # Decoding parameters
@@ -164,9 +169,9 @@ Transformer: !new:speechbrain.lobes.models.transformer.TransformerASR.Transforme
     normalize_before: True
     causal: False
 
-# BoundaryPredictor operates on the flattened CNN output (B, T, 640)
-# before the Conformer encoder.
-BoundaryPredictor: !new:boundary_predictor.BoundaryPredictor
+# Downsampler slot: any module returning a DownsampleOutput on (B, T, 640).
+# Swap this line to try a different downsampler.
+Downsampler: !new:boundary_predictor.BoundaryPredictor
     input_dim: 640
     prior: !ref <boundary_predictor_prior>
     temp: !ref <boundary_predictor_temp>
@@ -203,14 +208,14 @@ normalize: !new:speechbrain.processing.features.InputNormalization
 
 modules:
     CNN: !ref <CNN>
-    BoundaryPredictor: !ref <BoundaryPredictor>
+    Downsampler: !ref <Downsampler>
     Transformer: !ref <Transformer>
     seq_lin: !ref <seq_lin>
     ctc_lin: !ref <ctc_lin>
     normalize: !ref <normalize>
 
 model: !new:torch.nn.ModuleList
-    - [!ref <CNN>, !ref <BoundaryPredictor>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
+    - [!ref <CNN>, !ref <Downsampler>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
 
 # define two optimizers here for two-stage training
 Adam: !name:torch.optim.Adam

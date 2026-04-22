@@ -1,15 +1,13 @@
 """Minimal BoundaryPredictor: per-frame MLP + mean pooling.
 
-Ported from speechbrainwhisper/BoundaryPredictor4.py with the class renamed.
-
-Forward returns a 10-tuple:
-    pooled, loss, num_boundaries, total_positions, shortened_lengths,
-    boundary_cv, boundary_adjacent_pct, masked_probs,
-    num_boundaries_per_sample, total_positions_per_sample
+Concrete Downsampler implementation (see downsampler.py). Ported from
+speechbrainwhisper/BoundaryPredictor4.py with the class renamed.
 """
 
 import torch
 import torch.nn as nn
+
+from downsampler import DownsampleOutput
 
 
 def _segment_indicator(boundaries):
@@ -170,59 +168,47 @@ class BoundaryPredictor(nn.Module):
 
     # ----------------------------------------------------------------- forward
 
-    def forward(
-        self,
-        hidden,
-        lengths,
-        target_boundary_counts=None,  # noqa: ARG002 - kept for interface compat
-        return_unreduced_boundary_loss=False,
-    ):
+    def forward(self, hidden, lengths):
         batch_size, seq_len, _ = hidden.shape
 
         if self.boundary_mode == "all":
-            hard_boundaries, hard_samples, masked_probs = (
+            hard_boundaries, hard_samples, _ = (
                 self._compute_forced_boundaries(hidden, lengths, every_n=1))
         elif self.boundary_mode == "alternating":
-            hard_boundaries, hard_samples, masked_probs = (
+            hard_boundaries, hard_samples, _ = (
                 self._compute_forced_boundaries(hidden, lengths, every_n=2))
         else:  # "learned"
-            hard_boundaries, hard_samples, masked_probs = (
+            hard_boundaries, hard_samples, _ = (
                 self._compute_learned_boundaries(hidden, lengths))
 
         pooled = self._mean_pooling(hard_boundaries, hidden)
 
         max_segments = pooled.shape[1] if pooled.shape[1] > 0 else 1
         num_boundaries_per_sample = hard_boundaries.sum(dim=1)
-        shortened_lengths = num_boundaries_per_sample / max_segments
+        new_lengths = num_boundaries_per_sample / max_segments
 
         actual_lens = (lengths * seq_len).long()
-        num_boundaries = hard_boundaries.sum().item()
-        total_positions = actual_lens.sum().float().item()
-        total_positions_per_sample = actual_lens.float()
+        num_output = int(hard_boundaries.sum().item())
+        num_input = int(actual_lens.sum().item())
 
         if self.training and self.boundary_mode == "learned":
-            per_sample_loss = self._binomial_loss(hard_boundaries, lengths)
-            loss = per_sample_loss if return_unreduced_boundary_loss else per_sample_loss.mean()
+            loss = self._binomial_loss(hard_boundaries, lengths).mean()
         else:
             loss = torch.tensor(0.0, device=hidden.device)
-            if return_unreduced_boundary_loss:
-                loss = loss.repeat(batch_size)
 
-        boundary_cv = None
-        boundary_adjacent_pct = None
+        extra_stats = None
         if not self.training:
-            boundary_cv, boundary_adjacent_pct = self._compute_eval_stats(
-                hard_samples, batch_size)
+            cv, adj_pct = self._compute_eval_stats(hard_samples, batch_size)
+            extra_stats = {
+                "boundary_cv": cv,
+                "boundary_adjacent_pct": adj_pct,
+            }
 
-        return (
-            pooled,
-            loss,
-            num_boundaries,
-            total_positions,
-            shortened_lengths,
-            boundary_cv,
-            boundary_adjacent_pct,
-            masked_probs,
-            num_boundaries_per_sample,
-            total_positions_per_sample,
+        return DownsampleOutput(
+            hidden=pooled,
+            lengths=new_lengths,
+            loss=loss,
+            num_output=num_output,
+            num_input=num_input,
+            extra_stats=extra_stats,
         )

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Training recipe with BoundaryPredictor compression between CNN and Transformer.
+"""Training recipe with a pluggable Downsampler between CNN and Transformer.
 
 Identical to train.py except the encoder forward pass is:
-    feats -> CNN -> reshape(4D->3D) -> BoundaryPredictor -> Transformer
-and the objective adds a binomial BP loss:
-    loss = loss_asr + boundary_predictor_loss_weight * bp_loss
+    feats -> CNN -> reshape(4D->3D) -> Downsampler -> Transformer
+and the objective adds the downsampler's auxiliary loss (e.g. BP's binomial
+prior loss):
+    loss = loss_asr + downsample_loss_weight * downsample_loss
+
+The Downsampler is any nn.Module whose `forward(hidden, lengths)` returns a
+`DownsampleOutput` (see downsampler.py). BoundaryPredictor is one concrete
+implementation; new downsamplers drop into the `Downsampler` yaml slot.
 
 Run with:
-    python train_bp.py hparams/conformer_small_bp.yaml
+    python train_downsample.py hparams/conformer_small_downsample.yaml
 """
 
 import os
@@ -48,27 +53,20 @@ class ASR(sb.core.Brain):
         enc = self.modules.CNN(feats)
         enc_lens = wav_lens
 
-        # CNN outputs (B, T, C1, C2); BP expects (B, T, D)
+        # CNN outputs (B, T, C1, C2); Downsampler expects (B, T, D)
         if enc.dim() == 4:
             bz, t, ch1, ch2 = enc.shape
             enc = enc.reshape(bz, t, ch1 * ch2)
 
-        # BoundaryPredictor: compresses sequence, produces binomial prior loss
-        (enc, bp_loss, num_boundaries, total_positions,
-         enc_lens, boundary_cv, boundary_adjacent_pct,
-         _bp_probs, _bp_n_per_sample,
-         _bp_total_per_sample) = self.modules.BoundaryPredictor(
-            hidden=enc,
-            lengths=enc_lens,
-            target_boundary_counts=None,
-            return_unreduced_boundary_loss=False,
-        )
+        # Downsampler: compresses the sequence and returns an auxiliary loss
+        ds_out = self.modules.Downsampler(enc, enc_lens)
+        enc = ds_out.hidden
+        enc_lens = ds_out.lengths
 
-        self.boundary_predictor_loss = bp_loss
-        self.num_boundaries = num_boundaries
-        self.total_positions = total_positions
-        self.boundary_cv = boundary_cv
-        self.boundary_adjacent_pct = boundary_adjacent_pct
+        self.downsample_loss = ds_out.loss
+        self.num_output = ds_out.num_output
+        self.num_input = ds_out.num_input
+        self.downsample_extra_stats = ds_out.extra_stats or {}
 
         enc_out, pred = self.modules.Transformer(
             enc, tokens_bos, enc_lens, pad_idx=self.hparams.pad_index
@@ -138,11 +136,11 @@ class ASR(sb.core.Brain):
         )
 
         if stage == sb.Stage.TRAIN:
-            loss_bp = self.boundary_predictor_loss
+            loss_ds = self.downsample_loss
         else:
-            loss_bp = torch.tensor(0.0, device=p_ctc.device)
+            loss_ds = torch.tensor(0.0, device=p_ctc.device)
 
-        loss = loss_asr + self.hparams.boundary_predictor_loss_weight * loss_bp
+        loss = loss_asr + self.hparams.downsample_loss_weight * loss_ds
 
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
@@ -178,26 +176,61 @@ class ASR(sb.core.Brain):
             self.acc_metric = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
         else:
-            # Linear temperature anneal 1.0 -> ~0 across training, clamped 1 step short.
-            total_epochs = self.hparams.number_of_epochs
-            if total_epochs > 1:
-                effective_epoch = min(epoch, total_epochs - 2)
-                temperature = 1.0 - (effective_epoch / (total_epochs - 1))
+            self._schedule_downsampler(epoch)
+
+    def _schedule_downsampler(self, epoch):
+        """Per-epoch schedules for the Downsampler (optional).
+
+        Temperature: if `fixed_temperature` is set in hparams, pin to that.
+        Otherwise, linearly anneal 1.0 -> ~0 across training, clamped one step
+        short so RelaxedBernoulli never sees temp=0.
+
+        Prior: if `prior_warmup_epochs` is set, linearly ramp the downsampler's
+        prior from `prior_warmup_start` to `prior_warmup_end` over that many
+        epochs, then hold.
+        """
+        ds = self.modules.Downsampler
+
+        if hasattr(ds, "set_temperature"):
+            fixed_temp = getattr(self.hparams, "fixed_temperature", None)
+            if fixed_temp is not None:
+                temperature = float(fixed_temp)
             else:
-                temperature = 1.0
-            self.modules.BoundaryPredictor.set_temperature(temperature)
+                total_epochs = self.hparams.number_of_epochs
+                if total_epochs > 1:
+                    effective_epoch = min(epoch, total_epochs - 2)
+                    temperature = 1.0 - (effective_epoch / (total_epochs - 1))
+                else:
+                    temperature = 1.0
+            ds.set_temperature(temperature)
             logger.info(
-                f"Epoch {epoch}: BoundaryPredictor temperature = {temperature:.4f}"
+                f"Epoch {epoch}: Downsampler temperature = {temperature:.4f}"
             )
+
+        warmup_epochs = getattr(self.hparams, "prior_warmup_epochs", None)
+        if warmup_epochs is not None and hasattr(ds, "set_prior"):
+            start_p = float(self.hparams.prior_warmup_start)
+            end_p = float(self.hparams.prior_warmup_end)
+            progress = min(max(epoch / float(warmup_epochs), 0.0), 1.0)
+            prior = start_p + (end_p - start_p) * progress
+            ds.set_prior(prior)
+            logger.info(
+                f"Epoch {epoch}: Downsampler prior = {prior:.4f}"
+            )
+
+    def _log_downsample_stats(self, stage_stats):
+        """Add keep_rate + whatever extra stats the Downsampler reported."""
+        if getattr(self, "num_input", 0) > 0:
+            stage_stats["keep_rate"] = self.num_output / self.num_input
+        for k, v in getattr(self, "downsample_extra_stats", {}).items():
+            if v is not None:
+                stage_stats[k] = v
 
     def on_stage_end(self, stage, stage_loss, epoch):
         stage_stats = {"loss": stage_loss}
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
-            if getattr(self, "total_positions", 0) > 0:
-                stage_stats["boundary_rate"] = (
-                    self.num_boundaries / self.total_positions
-                )
+            self._log_downsample_stats(stage_stats)
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
             current_epoch = self.hparams.epoch_counter.current
@@ -207,14 +240,7 @@ class ASR(sb.core.Brain):
                 or stage == sb.Stage.TEST
             ):
                 stage_stats["WER"] = self.wer_metric.summarize("error_rate")
-            if getattr(self, "total_positions", 0) > 0:
-                stage_stats["boundary_rate"] = (
-                    self.num_boundaries / self.total_positions
-                )
-            if self.boundary_cv is not None:
-                stage_stats["boundary_cv"] = self.boundary_cv
-            if self.boundary_adjacent_pct is not None:
-                stage_stats["boundary_adjacent_pct"] = self.boundary_adjacent_pct
+            self._log_downsample_stats(stage_stats)
 
         if stage == sb.Stage.VALID:
             lr = self.hparams.noam_annealing.current_lr
