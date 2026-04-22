@@ -21,13 +21,30 @@ class QformerFrontEnd(nn.Module):
     def __init__(
         self,
         n_mels: int = 80,
-        out_channels: tuple = (64, 32, 32),
-        kernel_size: tuple = (3, 3),
-        strides: tuple = ((2, 1), (2, 1), (1, 1)),
+        out_channels=(64, 32, 32),
+        kernel_size=(3, 3),
+        strides=((2, 2), (2, 1), (1, 1)),
         dropout: float = 0.1,
     ):
         super().__init__()
-        assert len(out_channels) == 3 and len(strides) == 3
+        out_channels = tuple(out_channels)
+        kernel_size = tuple(kernel_size)
+        strides = tuple(tuple(s) for s in strides)
+        if len(out_channels) != 3:
+            raise ValueError(
+                f"out_channels must have length 3, got {len(out_channels)}: "
+                f"{out_channels!r}"
+            )
+        if len(strides) != 3:
+            raise ValueError(
+                f"strides must have length 3, got {len(strides)}: {strides!r}"
+            )
+        for i, s in enumerate(strides):
+            if len(s) != 2:
+                raise ValueError(
+                    f"strides[{i}] must be (freq_stride, time_stride), "
+                    f"got {s!r}"
+                )
 
         in_channels = (1, out_channels[0], out_channels[1])
         self.conv1 = Conv2d(
@@ -48,13 +65,6 @@ class QformerFrontEnd(nn.Module):
         self.bn3 = nn.BatchNorm2d(out_channels[2])
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout)
-
-        for s in strides:
-            if s[1] != 1:
-                raise ValueError(
-                    f"strides[{s}] has time_stride != 1; this frontend must "
-                    "preserve the time axis"
-                )
 
     def _apply(self, x, conv, bn):
         # Conv2d (skip_transpose=False) takes (B, T, F, C) and returns (B, T', F', C').

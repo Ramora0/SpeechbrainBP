@@ -150,9 +150,12 @@ ctc_weight_decode: 0.40
 # 32 channels * 20 freq bins = 640.
 CNN: !new:qformer_frontend.QformerFrontEnd
     n_mels: !ref <n_mels>
-    out_channels: (64, 32, 32)
-    kernel_size: (3, 3)
-    strides: ((2, 2), (2, 1), (1, 1))
+    out_channels: [64, 32, 32]
+    kernel_size: [3, 3]
+    strides:
+        - [2, 2]
+        - [2, 1]
+        - [1, 1]
     dropout: !ref <transformer_dropout>
 
 # Deterministic stride subsample. Internally subsamples the CNN output by
