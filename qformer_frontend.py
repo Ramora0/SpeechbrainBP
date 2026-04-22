@@ -66,7 +66,7 @@ class QformerFrontEnd(nn.Module):
         self.act = nn.GELU()
         self.drop = nn.Dropout(dropout)
 
-    def _apply(self, x, conv, bn):
+    def _conv_block(self, x, conv, bn):
         # Conv2d (skip_transpose=False) takes (B, T, F, C) and returns (B, T', F', C').
         x = conv(x)
         # BatchNorm2d expects (N, C, H, W). Convert (B, T, F, C) -> (B, C, T, F).
@@ -83,8 +83,8 @@ class QformerFrontEnd(nn.Module):
                 f"got input with shape {tuple(x.shape)}"
             )
         x = x.unsqueeze(-1)
-        x = self._apply(x, self.conv1, self.bn1)
-        x = self._apply(x, self.conv2, self.bn2)
-        x = self._apply(x, self.conv3, self.bn3)
+        x = self._conv_block(x, self.conv1, self.bn1)
+        x = self._conv_block(x, self.conv2, self.bn2)
+        x = self._conv_block(x, self.conv3, self.bn3)
         b, t, f, c = x.shape
         return x.reshape(b, t, f * c)
