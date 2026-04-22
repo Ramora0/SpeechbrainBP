@@ -105,6 +105,9 @@ class QformerTransformerASR(nn.Module):
             rope_max_length=rope_max_length,
         )
 
+        # The decoder always uses regularMHA — matches upstream TransformerASR
+        # (Transformer.py:242, "always use regular attention in decoder").
+        # The encoder's attention_type is independent.
         self.decoder = TransformerDecoder(
             num_layers=num_decoder_layers,
             nhead=nhead,
@@ -114,7 +117,7 @@ class QformerTransformerASR(nn.Module):
             activation=activation,
             normalize_before=True,
             causal=True,
-            attention_type=attention_type,
+            attention_type="regularMHA",
         )
 
         self._init_params()
