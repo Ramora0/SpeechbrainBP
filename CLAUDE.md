@@ -29,11 +29,13 @@ Transformer Decoder → CTC + Seq2Seq + λ · downsample_aux_loss
 Qformer:
 ```
 Audio → Fbank → Normalize → [SpecAugment] →
-QformerFrontEnd (3 convs, NO time downsampling) →
-QformerDownsampler (queries = seq[::query_stride=8], kv = seq[::kv_stride=2]) →
-QformerConformerEncoder (layers 1..4 cross-attend to kv; 5..12 self-attn) →
+QformerFrontEnd (3 convs; first strides time by cnn_time_stride, rest stride-1) →
+QformerDownsampler (queries at fbank-stride query_stride; kv at fbank-stride kv_stride) →
+QformerConformerEncoder (layers 1..4 cross-attend to kv with RoPE at original
+                         fbank-frame positions; layers 5..12 self-attn only) →
 Transformer Decoder → CTC + Seq2Seq (no aux downsampler loss)
 ```
+At defaults (8/2/2): kv IS the CNN output (no extra subsample); queries are every 4th CNN output. Later convs see ~11-frame input RF per output (vs 7 if the CNN were stride-1 throughout), for strictly less compute.
 
 - Decoding: CTC/Attention beam search with pretrained TransformerLM
 - Baseline loss: `0.3 * CTC + 0.7 * KLdiv`
@@ -134,13 +136,16 @@ BoundaryPredictor-specific (only used when the `Downsampler:` slot is `boundary_
 - `boundary_mode: learned` — `learned` | `all` (every position) | `alternating` (every other)
 
 Qformer track (`conformer_small_qformer.yaml`):
-- `query_stride: 8` — queries = every 8th post-CNN frame → 8x total time compression from fbank
-- `kv_stride: 2` — cross-attention kv = every 2nd post-CNN frame; 4x longer than queries, but 2x shorter than full-rate (memory control knob — set to 1 for full-rate xattn, higher values για tighter memory)
+- `query_stride: 8` — queries live at every 8th fbank frame (80ms at 100fps)
+- `kv_stride: 2`   — kv lives at every 2nd fbank frame; queries then cross-attend over 4x as many kv positions as their own length
+- `cnn_time_stride: 2` — how much of the time downsampling the CNN's first conv does (the CNN produces at rate 1/cnn_time_stride). Must divide both query_stride και kv_stride. Pushing stride into the CNN gives later convs a larger per-frame RF για less compute.
 - `num_cross_attn_layers: 4` — how many of the 12 Conformer layers get cross-attention; remaining are plain self-attn
 - `downsample_loss_weight: 0.0` — Qformer downsampler returns no aux loss; kept at 0
 - `max_batch_length_train: 750` — halved από the BP track (xattn keeps a longer kv sequence around than plain self-attn)
 
-The Qformer CNN strides follow SpeechbrainWhisper's `(freq_stride, time_stride)` tuple convention — e.g. `stride=(2,1)` reduces frequency και preserves time, mirroring SBW's `time_stride_conv` idiom.
+Cross-attention uses a RoPE-based MHA whose rotation positions are computed από the ORIGINAL fbank-frame index of each query/key — so `q_i` rotates at position `i·query_stride` και `k_j` rotates at position `j·kv_stride`. This is the natural primitive when queries και keys are different-rate samplings of the same underlying timeline.
+
+The Qformer CNN strides follow SpeechbrainWhisper's `(freq_stride, time_stride)` tuple convention — e.g. `stride=(2,2)` reduces both, `stride=(2,1)` reduces frequency only, mirroring SBW's `conformer_Nx` idiom.
 
 ## Expected Results
 

@@ -2,14 +2,17 @@
 
 Standalone `nn.Module` (not a subclass of `TransformerASR`) because the
 upstream `forward` / `encode` hard-code a single-src assumption. This module
-owns the pieces individually: custom_src_module, positional encodings, the
-Qformer Conformer encoder, and a standard TransformerDecoder.
+owns the pieces individually: custom_src_module, self-attn positional
+encoding, the Qformer Conformer encoder, και a standard TransformerDecoder.
 
 The forward pass accepts `(src, kv, tgt, query_lens, kv_lens)`:
 - `src`: subsampled queries post-CNN, shape (B, S, input_size)
-- `kv`:  full-rate post-CNN sequence, shape (B, T, input_size)
+- `kv`:  strided kv post-CNN, shape (B, K, input_size) — already subsampled
+        by `kv_stride` in the Downsampler
 - Both are projected via a shared `custom_src_module` into d_model.
-- Cross-attention in the first N encoder layers pulls context from `kv`.
+- Cross-attention in the first N encoder layers uses RoPE με original-frame
+  positions (q_i at frame i·query_stride, k_j at frame j·kv_stride) so
+  attention respects the actual temporal layout.
 
 A matching `decode(tgt, encoder_out, enc_len)` is provided so the standard
 `S2STransformerBeamSearcher` works without modification.
@@ -41,6 +44,8 @@ class QformerTransformerASR(nn.Module):
         self,
         tgt_vocab,
         input_size,
+        query_stride: int,
+        kv_stride: int,
         d_model=144,
         nhead=4,
         num_encoder_layers=12,
@@ -54,6 +59,7 @@ class QformerTransformerASR(nn.Module):
         conformer_activation: type = Swish,
         attention_type: str = "RelPosMHAXL",
         max_length: int = 4000,
+        rope_max_length: int = 4000,
         causal: bool = False,
     ):
         super().__init__()
@@ -64,6 +70,8 @@ class QformerTransformerASR(nn.Module):
             )
         self.attention_type = attention_type
         self.causal = causal
+        self.query_stride = query_stride
+        self.kv_stride = kv_stride
 
         self.custom_src_module = ModuleList(
             Linear(
@@ -79,13 +87,14 @@ class QformerTransformerASR(nn.Module):
         else:
             self.positional_encoding = PositionalEncoding(d_model, max_length)
         self.positional_encoding_decoder = PositionalEncoding(d_model, max_length)
-        self.kv_abs_pos = PositionalEncoding(d_model, max_length)
 
         self.encoder = QformerConformerEncoder(
             num_layers=num_encoder_layers,
             d_model=d_model,
             d_ffn=d_ffn,
             nhead=nhead,
+            query_stride=query_stride,
+            kv_stride=kv_stride,
             num_cross_attn_layers=num_cross_attn_layers,
             kernel_size=kernel_size,
             activation=conformer_activation,
@@ -93,6 +102,7 @@ class QformerTransformerASR(nn.Module):
             dropout=dropout,
             causal=causal,
             attention_type=attention_type,
+            rope_max_length=rope_max_length,
         )
 
         self.decoder = TransformerDecoder(
@@ -113,8 +123,6 @@ class QformerTransformerASR(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_normal_(p)
-        for layer in self.encoder.layers[: self.encoder.num_cross_attn_layers]:
-            layer._zero_init_cross_attention()
 
     def _build_key_padding_mask(self, seq, rel_lens):
         abs_lens = torch.round(rel_lens * seq.size(1)).long()
@@ -130,7 +138,8 @@ class QformerTransformerASR(nn.Module):
             src = src + self.positional_encoding(src)
             pos_embs_self = None
 
-        kv = kv + self.kv_abs_pos(kv)
+        # No separate positional encoding on kv here — RoPE in each xattn
+        # layer applies positions tied to the original fbank-frame indices.
 
         src_key_padding_mask = self._build_key_padding_mask(src, query_lens)
         kv_key_padding_mask = self._build_key_padding_mask(kv, kv_lens)

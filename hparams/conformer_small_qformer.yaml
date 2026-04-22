@@ -106,15 +106,19 @@ transformer_dropout: 0.1
 activation: !name:torch.nn.GELU
 output_neurons: 5000
 
-# Downsampler strides (independent, both configurable):
-# - query_stride: every Nth post-CNN frame becomes a query (8x total time
-#   compression from fbank when paired with the stride-preserving frontend).
-# - kv_stride: kv given to the cross-attention layers is every Mth frame of
-#   the full-rate post-CNN sequence. Setting this to 2 (vs. 1 = full rate)
-#   keeps memory reasonable; queries @ 8 cross-attend to kv @ 2, so there
-#   are 4x more kv frames than queries.
+# Strides are ALL measured in input (fbank) frames:
+# - query_stride: queries are every Nth fbank frame (8 = 80ms at 100fps).
+# - kv_stride:    kv is every Mth fbank frame — controls xattn memory.
+# - cnn_time_stride: how much of the time downsampling the CNN's first conv
+#   already does. Pushing stride into the CNN (vs. doing it as a pure subsample
+#   afterward) gives later convs a proportionally larger per-frame receptive
+#   field και saves compute. Must divide both query_stride και kv_stride.
+#
+# Defaults: 8/2/2 — CNN produces kv directly (no extra kv subsample), queries
+# are then every 4th CNN output. 11-frame input RF per CNN output.
 query_stride: 8
 kv_stride: 2
+cnn_time_stride: 2
 
 # Outputs
 blank_index: 0
@@ -138,28 +142,38 @@ ctc_weight_decode: 0.40
 
 ############################## Models ##########################################
 
-# 3-conv stride-preserving frontend: (B, T, 80) -> (B, T, 640).
-# Stride tuple follows SBW's (freq_stride, time_stride) convention. Every
-# time_stride is 1 so the time axis is untouched; freq is halved twice so
-# the flattened output dim lands at 32 channels * 20 freq bins = 640.
+# 3-conv frontend: (B, T, 80) -> (B, T / cnn_time_stride, 640).
+# Stride tuple follows SBW's (freq_stride, time_stride) convention. The
+# first conv does the time downsampling (cnn_time_stride = 2) so later convs
+# see a larger per-frame receptive field; freq is halved twice across the
+# first two convs (80 -> 40 -> 20), and the flattened output dim lands at
+# 32 channels * 20 freq bins = 640.
 CNN: !new:qformer_frontend.QformerFrontEnd
     n_mels: !ref <n_mels>
     out_channels: (64, 32, 32)
     kernel_size: (3, 3)
-    strides: ((2, 1), (2, 1), (1, 1))
+    strides: ((2, 2), (2, 1), (1, 1))
     dropout: !ref <transformer_dropout>
 
-# Deterministic stride-N subsample. Returns both queries (stride-8 view) and
-# full-rate kv (unchanged input). No learnable parameters.
+# Deterministic stride subsample. Internally subsamples the CNN output by
+# (query_stride / cnn_time_stride) and (kv_stride / cnn_time_stride), so the
+# resulting queries and kv sit at input-stride query_stride and kv_stride.
+# At defaults (8/2/2), kv IS the CNN output directly (no additional subsample).
 Downsampler: !new:qformer_downsampler.QformerDownsampler
     query_stride: !ref <query_stride>
     kv_stride: !ref <kv_stride>
+    cnn_time_stride: !ref <cnn_time_stride>
 
 # Qformer-style TransformerASR: main Conformer encoder whose first
-# `num_cross_attn_layers` layers cross-attend to the full-rate kv.
+# `num_cross_attn_layers` layers cross-attend to kv with RoPE applied at
+# input-frame positions (query i sits at fbank frame i*query_stride, key j
+# at frame j*kv_stride) so attention respects the actual temporal layout
+# across the two differently-strided sequences.
 Transformer: !new:qformer_transformer.QformerTransformerASR
     input_size: 640
     tgt_vocab: !ref <output_neurons>
+    query_stride: !ref <query_stride>
+    kv_stride: !ref <kv_stride>
     d_model: !ref <d_model>
     nhead: !ref <nhead>
     num_encoder_layers: !ref <num_encoder_layers>
