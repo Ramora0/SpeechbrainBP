@@ -1,0 +1,349 @@
+# ############################################################################
+# Model: E2E ASR with Qformer-style cross-attention
+# Encoder:
+#   3-conv stride-preserving CNN (time axis untouched, freq halved twice)
+#     -> QformerDownsampler (stride-8 subsample; exposes both queries and kv)
+#     -> QformerConformerEncoder (first 4 layers cross-attend to full-rate kv)
+# Decoder: Transformer Decoder + (CTC/ATT joint) beamsearch + TransformerLM
+# Tokens: unigram
+# losses: CTC + KLdiv (the downsampler contributes no aux loss on this track)
+#
+# This yaml is isolated from the BoundaryPredictor track — new CNN frontend,
+# new Downsampler slot, new Transformer, new train script.
+# ############################################################################
+
+seed: 7776
+__set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
+wandb_run_name: !ref conformer-small-qformer-s<seed>
+output_folder: !ref /fs/scratch/PAS2836/lees_stuff/librispeechbrain/results/<wandb_run_name>
+output_wer_folder: !ref <output_folder>/
+save_folder: !ref <output_folder>/save
+train_log: !ref <output_folder>/train_log.txt
+
+# Language model (LM) pretraining
+pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech
+
+# Data files
+data_folder: /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech
+data_manifest_folder: /fs/scratch/PAS2836/lees_stuff/librispeechbrain/data_manifests
+
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
+dev_splits: ["dev-clean"]
+test_splits: ["test-clean", "test-other"]
+skip_prep: False
+train_csv: !ref <data_manifest_folder>/train.csv
+valid_csv: !ref <data_manifest_folder>/dev-clean.csv
+test_csv:
+    - !ref <data_manifest_folder>/test-clean.csv
+    - !ref <data_manifest_folder>/test-other.csv
+
+####################### Training Parameters ####################################
+
+number_of_epochs: 110
+batch_size: 16
+ctc_weight: 0.3
+grad_accumulation_factor: 1
+max_grad_norm: 5.0
+loss_reduction: 'batchmean'
+sorting: random
+num_workers: 4
+precision: fp16
+avg_checkpoints: 10
+
+lr_adam: 0.001
+
+sample_rate: 16000
+n_fft: 400
+n_mels: 80
+
+# Qformer track runs cross-attention over the full-rate sequence, which is 8x
+# longer than the post-downsample queries. Halve the batch length budget
+# versus the BP track (which was 1500) to leave VRAM headroom for the xattn
+# attention matrices on V100 32GB.
+dynamic_batching: True
+max_batch_length_train: 750
+max_batch_length_val: 50
+num_bucket: 200
+shuffle: True
+batch_ordering: random
+max_batch_ex: 128
+
+dynamic_batch_sampler_train:
+    max_batch_length: !ref <max_batch_length_train>
+    num_buckets: !ref <num_bucket>
+    shuffle: !ref <shuffle>
+    batch_ordering: !ref <batch_ordering>
+    max_batch_ex: !ref <max_batch_ex>
+
+dynamic_batch_sampler_valid:
+    max_batch_length: !ref <max_batch_length_val>
+    num_buckets: !ref <num_bucket>
+    shuffle: !ref <shuffle>
+    batch_ordering: !ref <batch_ordering>
+    max_batch_ex: !ref <max_batch_ex>
+
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    shuffle: True
+    num_workers: !ref <num_workers>
+
+valid_dataloader_opts:
+    batch_size: 1
+
+test_dataloader_opts:
+    batch_size: 1
+
+####################### Model Parameters #######################################
+
+# Transformer
+d_model: 144
+nhead: 4
+num_encoder_layers: 12
+num_cross_attn_layers: 4
+num_decoder_layers: 4
+d_ffn: 1024
+transformer_dropout: 0.1
+activation: !name:torch.nn.GELU
+output_neurons: 5000
+
+# Downsampler strides (independent, both configurable):
+# - query_stride: every Nth post-CNN frame becomes a query (8x total time
+#   compression from fbank when paired with the stride-preserving frontend).
+# - kv_stride: kv given to the cross-attention layers is every Mth frame of
+#   the full-rate post-CNN sequence. Setting this to 2 (vs. 1 = full rate)
+#   keeps memory reasonable; queries @ 8 cross-attend to kv @ 2, so there
+#   are 4x more kv frames than queries.
+query_stride: 8
+kv_stride: 2
+
+# Outputs
+blank_index: 0
+label_smoothing: 0.0
+pad_index: 0
+bos_index: 1
+eos_index: 2
+
+# Downsampler auxiliary loss weight (Qformer downsampler returns 0 — weight
+# kept for structural parity with the BP track train loop)
+downsample_loss_weight: 0.0
+
+# Decoding parameters
+min_decode_ratio: 0.0
+max_decode_ratio: 1.0
+valid_search_interval: 10
+valid_beam_size: 10
+test_beam_size: 66
+lm_weight: 0.60
+ctc_weight_decode: 0.40
+
+############################## Models ##########################################
+
+# 3-conv stride-preserving frontend: (B, T, 80) -> (B, T, 640).
+# Stride tuple follows SBW's (freq_stride, time_stride) convention. Every
+# time_stride is 1 so the time axis is untouched; freq is halved twice so
+# the flattened output dim lands at 32 channels * 20 freq bins = 640.
+CNN: !new:qformer_frontend.QformerFrontEnd
+    n_mels: !ref <n_mels>
+    out_channels: (64, 32, 32)
+    kernel_size: (3, 3)
+    strides: ((2, 1), (2, 1), (1, 1))
+    dropout: !ref <transformer_dropout>
+
+# Deterministic stride-N subsample. Returns both queries (stride-8 view) and
+# full-rate kv (unchanged input). No learnable parameters.
+Downsampler: !new:qformer_downsampler.QformerDownsampler
+    query_stride: !ref <query_stride>
+    kv_stride: !ref <kv_stride>
+
+# Qformer-style TransformerASR: main Conformer encoder whose first
+# `num_cross_attn_layers` layers cross-attend to the full-rate kv.
+Transformer: !new:qformer_transformer.QformerTransformerASR
+    input_size: 640
+    tgt_vocab: !ref <output_neurons>
+    d_model: !ref <d_model>
+    nhead: !ref <nhead>
+    num_encoder_layers: !ref <num_encoder_layers>
+    num_cross_attn_layers: !ref <num_cross_attn_layers>
+    num_decoder_layers: !ref <num_decoder_layers>
+    d_ffn: !ref <d_ffn>
+    dropout: !ref <transformer_dropout>
+    activation: !ref <activation>
+    attention_type: RelPosMHAXL
+    causal: False
+
+# This is the TransformerLM that is used according to the Huggingface repository
+# NB: It has to match the pre-trained TransformerLM!!
+lm_model: !new:speechbrain.lobes.models.transformer.TransformerLM.TransformerLM # yamllint disable-line rule:line-length
+    vocab: !ref <output_neurons>
+    d_model: 768
+    nhead: 12
+    num_encoder_layers: 12
+    num_decoder_layers: 0
+    d_ffn: 3072
+    dropout: 0.0
+    activation: !name:torch.nn.GELU
+    normalize_before: False
+
+tokenizer: !new:sentencepiece.SentencePieceProcessor
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+seq_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: !ref <d_model>
+    n_neurons: !ref <output_neurons>
+
+normalize: !new:speechbrain.processing.features.InputNormalization
+    norm_type: global
+    update_until_epoch: 4
+
+modules:
+    CNN: !ref <CNN>
+    Downsampler: !ref <Downsampler>
+    Transformer: !ref <Transformer>
+    seq_lin: !ref <seq_lin>
+    ctc_lin: !ref <ctc_lin>
+    normalize: !ref <normalize>
+
+model: !new:torch.nn.ModuleList
+    - [!ref <CNN>, !ref <Downsampler>, !ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
+
+Adam: !name:torch.optim.Adam
+    lr: !ref <lr_adam>
+    betas: (0.9, 0.98)
+    eps: 0.000000001
+
+############################## Decoding & optimiser ############################
+
+ctc_scorer: !new:speechbrain.decoders.scorer.CTCScorer
+    eos_index: !ref <eos_index>
+    blank_index: !ref <blank_index>
+    ctc_fc: !ref <ctc_lin>
+
+
+transformerlm_scorer: !new:speechbrain.decoders.scorer.TransformerLMScorer
+    language_model: !ref <lm_model>
+    temperature: 1.15
+
+scorer_test_search: !new:speechbrain.decoders.scorer.ScorerBuilder
+    full_scorers: [!ref <transformerlm_scorer>, !ref <ctc_scorer>]
+    weights:
+        ctc: !ref <ctc_weight_decode>
+        transformerlm: !ref <lm_weight>
+
+scorer_valid_search: !new:speechbrain.decoders.scorer.ScorerBuilder
+    full_scorers: [!ref <ctc_scorer>]
+    weights:
+        ctc: !ref <ctc_weight_decode>
+
+valid_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
+    modules: [!ref <Transformer>, !ref <seq_lin>]
+    bos_index: !ref <bos_index>
+    eos_index: !ref <eos_index>
+    min_decode_ratio: !ref <min_decode_ratio>
+    max_decode_ratio: !ref <max_decode_ratio>
+    beam_size: !ref <valid_beam_size>
+    using_eos_threshold: False
+    length_normalization: True
+    scorer: !ref <scorer_valid_search>
+
+test_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
+    modules: [!ref <Transformer>, !ref <seq_lin>]
+    bos_index: !ref <bos_index>
+    eos_index: !ref <eos_index>
+    min_decode_ratio: !ref <min_decode_ratio>
+    max_decode_ratio: !ref <max_decode_ratio>
+    beam_size: !ref <test_beam_size>
+    temperature: 1.15
+    using_eos_threshold: False
+    length_normalization: True
+    scorer: !ref <scorer_test_search>
+
+
+log_softmax: !new:torch.nn.LogSoftmax
+    dim: -1
+
+ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
+    blank_index: !ref <blank_index>
+    reduction: !ref <loss_reduction>
+
+seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
+    label_smoothing: !ref <label_smoothing>
+    reduction: !ref <loss_reduction>
+
+noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
+    lr_initial: !ref <lr_adam>
+    n_warmup_steps: 25000
+
+checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
+    checkpoints_dir: !ref <save_folder>
+    recoverables:
+        model: !ref <model>
+        noam_scheduler: !ref <noam_annealing>
+        normalizer: !ref <normalize>
+        counter: !ref <epoch_counter>
+
+epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
+    limit: !ref <number_of_epochs>
+
+############################## Augmentations ###################################
+
+speed_perturb: !new:speechbrain.augment.time_domain.SpeedPerturb
+    orig_freq: !ref <sample_rate>
+    speeds: [95, 100, 105]
+
+time_drop: !new:speechbrain.augment.freq_domain.SpectrogramDrop
+    drop_length_low: 15
+    drop_length_high: 25
+    drop_count_low: 4
+    drop_count_high: 4
+    replace: "mean"
+
+freq_drop: !new:speechbrain.augment.freq_domain.SpectrogramDrop
+    drop_length_low: 10
+    drop_length_high: 20
+    drop_count_low: 4
+    drop_count_high: 4
+    replace: "mean"
+    dim: 2
+
+time_warp: !new:speechbrain.augment.freq_domain.Warping
+
+fea_augment: !new:speechbrain.augment.augmenter.Augmenter
+    min_augmentations: 3
+    max_augmentations: 3
+    augment_prob: 1.0
+    augmentations: [
+        !ref <time_drop>,
+        !ref <freq_drop>,
+        !ref <time_warp>]
+
+compute_features: !new:speechbrain.lobes.features.Fbank
+    sample_rate: !ref <sample_rate>
+    n_fft: !ref <n_fft>
+    n_mels: !ref <n_mels>
+
+############################## Logging and Pretrainer ##########################
+
+wandb_project: speechbrain-new
+
+train_logger: !new:speechbrain.utils.train_logger.FileTrainLogger
+    save_file: !ref <train_log>
+
+wandb_logger: !new:speechbrain.utils.train_logger.WandBLogger
+    initializer: !name:wandb.init
+        project: !ref <wandb_project>
+        name: !ref <wandb_run_name>
+
+error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
+acc_computer: !name:speechbrain.utils.Accuracy.AccuracyStats
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <save_folder>
+    loadables:
+        lm: !ref <lm_model>
+        tokenizer: !ref <tokenizer>
+    paths:
+        lm: !ref <pretrained_lm_tokenizer_path>/lm.ckpt
+        tokenizer: !ref <pretrained_lm_tokenizer_path>/tokenizer.ckpt
