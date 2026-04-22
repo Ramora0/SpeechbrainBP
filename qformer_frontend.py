@@ -11,7 +11,6 @@ Input:  (B, T, n_mels=80)
 Output: (B, T, 640)   — time axis preserved
 """
 
-import torch
 import torch.nn as nn
 
 from speechbrain.nnet.CNN import Conv2d
@@ -27,6 +26,7 @@ class QformerFrontEnd(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.n_mels = n_mels
         out_channels = tuple(out_channels)
         kernel_size = tuple(kernel_size)
         strides = tuple(tuple(s) for s in strides)
@@ -77,6 +77,11 @@ class QformerFrontEnd(nn.Module):
 
     def forward(self, x):
         # x: (B, T, n_mels) from Fbank. Add channel dim: (B, T, n_mels, 1).
+        if x.size(-1) != self.n_mels:
+            raise ValueError(
+                f"QformerFrontEnd expected n_mels={self.n_mels} on last dim, "
+                f"got input with shape {tuple(x.shape)}"
+            )
         x = x.unsqueeze(-1)
         x = self._apply(x, self.conv1, self.bn1)
         x = self._apply(x, self.conv2, self.bn2)
