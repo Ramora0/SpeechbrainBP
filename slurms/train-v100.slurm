@@ -24,8 +24,7 @@ module load cuda/12.4.1
 
 cd "${SLURM_SUBMIT_DIR}"
 
-mkdir -p "$TMPDIR/LibriSpeech"
-rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/"
+mkdir -p "$TMPDIR/LibriSpeech" && rsync -a --info=progress2 /fs/scratch/PAS2836/lees_stuff/librispeechbrain/LibriSpeech/ "$TMPDIR/LibriSpeech/"
 
 source .v100/bin/activate
 python train.py "${HPARAMS_PATH}" --data_folder="$TMPDIR/LibriSpeech" "$@"

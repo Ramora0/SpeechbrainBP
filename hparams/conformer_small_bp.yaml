@@ -68,7 +68,7 @@ n_mels: 80
 # This setup works well for V100 32GB GPU, adapts it to your needs.
 # Or turn it off (but training speed will decrease)
 dynamic_batching: True
-max_batch_length_train: 900
+max_batch_length_train: 1500
 max_batch_length_val: 100 # we reduce it as the beam is much wider (VRAM)
 num_bucket: 200
 shuffle: True # if true re-creates batches at each epoch shuffling examples.
@@ -122,9 +122,9 @@ eos_index: 2
 
 # BoundaryPredictor parameters
 # prior: target fraction of boundaries -> compression ratio = 1/prior
-#   0.192 ≈ 5.2x compression on top of the 4x CNN (≈ 20.8x total)
+#   0.5 = 2x compression on top of the 4x CNN (= 8x total) — conservative default
 # boundary_mode: "learned" | "all" | "alternating"
-boundary_predictor_prior: 0.192
+boundary_predictor_prior: 0.5
 boundary_predictor_temp: 1.0
 boundary_predictor_loss_weight: 1.0
 boundary_mode: learned

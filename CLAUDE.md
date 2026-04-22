@@ -84,7 +84,7 @@ Shared (both tracks):
 - `number_of_epochs: 110`
 
 BP-only (`conformer_small_bp.yaml`):
-- `boundary_predictor_prior: 0.192` — target boundary fraction → ~5.2x compression on top of the 4x CNN
+- `boundary_predictor_prior: 0.5` — target boundary fraction → 2x compression on top of the 4x CNN (8x total); conservative default for testing
 - `boundary_predictor_temp: 1.0` — RelaxedBernoulli temperature (linearly annealed to ~0 by `train_bp.py`)
 - `boundary_predictor_loss_weight: 1.0` — weight of the binomial loss added to the ASR loss
 - `boundary_mode: learned` — `learned` | `all` (every position) | `alternating` (every other)
